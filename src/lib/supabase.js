@@ -255,9 +255,11 @@ export async function fetchLiveSupabaseData() {
         partner: partnerBat,
       },
       athleteNames,
-      workoutLogs: (workoutsRes.data || []).map((w) => ({
-        id: w.id,
-        profileId: w.profile_id || "primary",
+      workoutLogs: (workoutsRes.data || [])
+        .filter((w) => w.routine_id !== "telemetry_heartbeat")
+        .map((w) => ({
+          id: w.id,
+          profileId: w.profile_id || "primary",
         routineId: w.routine_id,
         routineTitle: w.routine_title,
         durationSec: w.duration_sec,
