@@ -10,12 +10,8 @@ export function PinLockOverlay({ onUnlocked }) {
 
   const handleDigit = (digit) => {
     if (pin.length < 4) {
-      const next = pin + digit
-      setPin(next)
+      setPin((prev) => (prev.length < 4 ? prev + digit : prev))
       setError(false)
-      if (next.length === 4) {
-        validatePin(next)
-      }
     }
   }
 
@@ -29,43 +25,30 @@ export function PinLockOverlay({ onUnlocked }) {
     setError(false)
   }
 
-  const validatePin = (inputPin) => {
-    const success = verifyAndUnlock(inputPin, remember)
-    if (success) {
-      setError(false)
-      onUnlocked()
-    } else {
-      setError(true)
-      setErrorMessage('Incorrect PIN. Default is 1234')
-      setTimeout(() => {
-        setPin('')
-      }, 400)
+  // Validate PIN whenever 4 digits have been entered
+  useEffect(() => {
+    if (pin.length === 4) {
+      const success = verifyAndUnlock(pin, remember)
+      if (success) {
+        setError(false)
+        onUnlocked()
+      } else {
+        setError(true)
+        setErrorMessage('Incorrect PIN. Default is 1234')
+        const timer = setTimeout(() => {
+          setPin('')
+        }, 400)
+        return () => clearTimeout(timer)
+      }
     }
-  }
+  }, [pin, remember, onUnlocked])
 
   // Support physical keyboard entry
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key >= '0' && e.key <= '9') {
-        setPin((prev) => {
-          if (prev.length < 4) {
-            const next = prev + e.key
-            setError(false)
-            if (next.length === 4) {
-              const success = verifyAndUnlock(next, remember)
-              if (success) {
-                setError(false)
-                onUnlocked()
-              } else {
-                setError(true)
-                setErrorMessage('Incorrect PIN. Default is 1234')
-                setTimeout(() => setPin(''), 400)
-              }
-            }
-            return next
-          }
-          return prev
-        })
+        setPin((prev) => (prev.length < 4 ? prev + e.key : prev))
+        setError(false)
       } else if (e.key === 'Backspace') {
         setPin((prev) => prev.slice(0, -1))
         setError(false)
@@ -76,7 +59,7 @@ export function PinLockOverlay({ onUnlocked }) {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [remember, onUnlocked])
+  }, [])
 
   return (
     <div
