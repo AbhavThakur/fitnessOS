@@ -241,6 +241,27 @@ export async function fetchLiveSupabaseData() {
       if (primaryBat !== null && partnerBat !== null) break;
     }
 
+    let primaryBiometrics = null;
+    let partnerBiometrics = null;
+
+    for (const rec of (workoutsRes.data || [])) {
+      if (
+        rec.routine_id === "telemetry_heartbeat" &&
+        Array.isArray(rec.completed_sets) &&
+        rec.completed_sets.length > 0
+      ) {
+        const bio = rec.completed_sets[0];
+        if (bio && typeof bio === "object") {
+          if ((!rec.profile_id || rec.profile_id === "primary") && !primaryBiometrics) {
+            primaryBiometrics = bio;
+          } else if (rec.profile_id === "partner" && !partnerBiometrics) {
+            partnerBiometrics = bio;
+          }
+        }
+      }
+      if (primaryBiometrics && partnerBiometrics) break;
+    }
+
     let athleteNames = null;
     if (profilesRes.data && profilesRes.data.length > 0) {
       athleteNames = {
@@ -253,6 +274,10 @@ export async function fetchLiveSupabaseData() {
       liveBattery: {
         primary: primaryBat,
         partner: partnerBat,
+      },
+      biometrics: {
+        primary: primaryBiometrics,
+        partner: partnerBiometrics,
       },
       athleteNames,
       workoutLogs: (workoutsRes.data || [])

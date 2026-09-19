@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { MobileTopBar } from "./components/MobileTopBar";
 import { RecoveryCard } from "./components/RecoveryCard";
+import { BiometricsCard } from "./components/BiometricsCard";
 import { GymDashboard } from "./components/GymDashboard";
 import { BadmintonDashboard } from "./components/BadmintonDashboard";
 import { RunningDashboard } from "./components/RunningDashboard";
@@ -77,6 +78,20 @@ export function App() {
               nextProfiles.partner = {
                 ...nextProfiles.partner,
                 battery: cloudData.liveBattery.partner ?? null,
+              };
+            }
+          }
+          if (cloudData.biometrics) {
+            if (nextProfiles.primary && cloudData.biometrics.primary) {
+              nextProfiles.primary = {
+                ...nextProfiles.primary,
+                biometrics: cloudData.biometrics.primary,
+              };
+            }
+            if (nextProfiles.partner && cloudData.biometrics.partner) {
+              nextProfiles.partner = {
+                ...nextProfiles.partner,
+                biometrics: cloudData.biometrics.partner,
               };
             }
           }
@@ -420,6 +435,12 @@ export function App() {
                 totalVolumeKg={totalVolumeKg}
                 weeklyTargetKg={currentProfile.weeklyVolumeTargetKg || 50000}
                 streakDays={streakDays}
+              />
+
+              {/* Real-time Health & Biometrics Hub (Heart Rate Curve, Sleep Hypnogram, Steps) */}
+              <BiometricsCard
+                profile={currentProfile}
+                biometrics={currentProfile.biometrics}
               />
 
               {/* Top Metrics Row */}
