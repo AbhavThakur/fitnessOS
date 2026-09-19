@@ -9,9 +9,8 @@ export function WatchSyncModal({ isOpen, onClose, onSaveConfig }) {
   const [config, setConfig] = useState(getCloudConfig());
   const [isTesting, setIsTesting] = useState(false);
   const [syncLog, setSyncLog] = useState([
-    "⚡ BLE Peripheral: Amazfit T-Rex 3 (MAC: 48:E7:29:A1:04) connected.",
-    "⚡ IronPulse Zepp OS Side-Service (v1.0.0) initialized.",
-    "⚡ Ready to synchronize Gym, Badminton, and Running sessions.",
+    "The watch uploads sessions to Supabase over its phone connection; this dashboard reads the same tables every 10s.",
+    "Enter your Supabase URL + anon key below, then test the connection.",
   ]);
 
   if (!isOpen) return null;

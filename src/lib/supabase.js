@@ -51,13 +51,8 @@ const INITIAL_MOCK_DATA = {
       shortName: "You",
       role: "Heavy Strength & Speed",
       device: "Amazfit T-Rex 3",
-      battery: 85,
+      battery: null,
       weightUnit: "kg",
-      recoveryScore: 88,
-      hrvRmssd: "58 ms",
-      recoveryHours: "18h left",
-      cnsRecovery: "Optimal",
-      muscleReadiness: "High Readiness",
       weeklyVolumeTargetKg: 45000,
       weeklyDistanceTargetKm: 25,
     },
@@ -67,13 +62,8 @@ const INITIAL_MOCK_DATA = {
       shortName: "Wife",
       role: "Sculpt, Glutes & Cardio",
       device: "Amazfit Active / Balance",
-      battery: 92,
+      battery: null,
       weightUnit: "kg",
-      recoveryScore: 94,
-      hrvRmssd: "66 ms",
-      recoveryHours: "6h left",
-      cnsRecovery: "Peak State",
-      muscleReadiness: "Primed & Ready",
       weeklyVolumeTargetKg: 28000,
       weeklyDistanceTargetKm: 20,
     },
@@ -94,12 +84,15 @@ export function getLocalStore() {
     try {
       const parsed = JSON.parse(saved);
       if (parsed?.profiles) {
-        // Purge legacy mock data IDs starting with w1, w2, w3, w_p, b1, b_p, r1, r2, r_p
+        // Only fall back to defaults when the cached list is genuinely unusable —
+        // never reset an athlete's real routines just because they have fewer than N.
         const hasLegacyDemoRoutine = (parsed.routines || []).some(
           (r) => r.id === "push_split_demo" || r.title?.includes("Demo"),
         );
         const routines =
-          !hasLegacyDemoRoutine && (parsed.routines || []).length >= 6
+          !hasLegacyDemoRoutine &&
+          Array.isArray(parsed.routines) &&
+          parsed.routines.length > 0
             ? parsed.routines
             : INITIAL_MOCK_DATA.routines;
 
@@ -397,6 +390,73 @@ export async function pushRoutinesToCloud(routines, profileId = "primary") {
     return { success: true, count: rows.length, data };
   } catch (e) {
     console.error("Error pushing routines to Supabase:", e);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Write-through sync: makes the cloud match this profile's routine list exactly.
+ * Upserts every current routine AND deletes cloud rows for routines the athlete
+ * removed, so a deleted split doesn't resurrect on the next poll.
+ */
+export async function syncRoutinesToCloud(routines, profileId = "primary") {
+  const supabase = getSupabase();
+  if (!supabase)
+    return { success: false, error: "Supabase client not connected" };
+  if (profileId !== "primary" && profileId !== "partner") {
+    return { success: false, error: `Invalid profile ID: ${profileId}` };
+  }
+
+  try {
+    const pushed = await pushRoutinesToCloud(routines, profileId);
+    if (!pushed.success) return pushed;
+
+    const keepIds = routines.map((r) =>
+      profileId === "partner"
+        ? `${r.id.replace(/_partner$/, "")}_partner`
+        : r.id.replace(/_partner$/, ""),
+    );
+
+    let del = supabase
+      .from("gym_routines")
+      .delete()
+      .eq("profile_id", profileId);
+    if (keepIds.length > 0) {
+      del = del.not(
+        "id",
+        "in",
+        `(${keepIds.map((id) => `"${id}"`).join(",")})`,
+      );
+    }
+    const { error: delErr } = await del;
+    if (delErr) throw delErr;
+
+    return { success: true, count: routines.length };
+  } catch (e) {
+    console.error("Error syncing routines to Supabase:", e);
+    return { success: false, error: e.message };
+  }
+}
+
+/** Permanently removes a synced session from the cloud so it stops appearing on every device. */
+export async function deleteCloudSession(kind, id) {
+  const supabase = getSupabase();
+  if (!supabase)
+    return { success: false, error: "Supabase client not connected" };
+
+  const table = {
+    gym: "workout_logs",
+    badminton: "badminton_matches",
+    running: "running_sessions",
+  }[kind];
+  if (!table) return { success: false, error: `Unknown session type: ${kind}` };
+
+  try {
+    const { error } = await supabase.from(table).delete().eq("id", id);
+    if (error) throw error;
+    return { success: true };
+  } catch (e) {
+    console.error("Error deleting session:", e);
     return { success: false, error: e.message };
   }
 }

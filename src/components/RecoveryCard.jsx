@@ -157,7 +157,7 @@ export function RecoveryCard({ profile, recovery }) {
       >
         <span>
           ⌚ Amazfit {profile?.device || "Wearable"} • 🔋
-          {profile?.battery || 85}% Battery
+          {profile?.battery ?? "—"}% Battery
         </span>
       </div>
     </div>

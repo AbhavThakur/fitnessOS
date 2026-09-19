@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { MobileTopBar } from "./components/MobileTopBar";
 import { RecoveryCard } from "./components/RecoveryCard";
@@ -27,6 +27,8 @@ import {
   getActiveProfileId,
   saveActiveProfileId,
   fetchLiveSupabaseData,
+  syncRoutinesToCloud,
+  deleteCloudSession,
 } from "./lib/supabase";
 
 export function App() {
@@ -40,6 +42,10 @@ export function App() {
   );
   const [isLocked, setIsLocked] = useState(isAppLocked());
   const [expandedActivityId, setExpandedActivityId] = useState(null);
+  const [routineSyncStatus, setRoutineSyncStatus] = useState(null);
+  // Profiles whose routines have local edits not yet confirmed by the cloud.
+  // The poll must not overwrite these or the athlete's edit silently vanishes.
+  const dirtyRoutineProfilesRef = useRef(new Set());
 
   useEffect(() => {
     saveLocalStore(data);
@@ -58,17 +64,19 @@ export function App() {
         if (!mounted || !cloudData) return;
         setData((prev) => {
           const nextProfiles = { ...prev.profiles };
+          // Battery always mirrors the cloud: the latest synced telemetry, or null
+          // when that athlete has never synced (never invent a percentage).
           if (cloudData.liveBattery) {
-            if (cloudData.liveBattery.primary != null && nextProfiles.primary) {
+            if (nextProfiles.primary) {
               nextProfiles.primary = {
                 ...nextProfiles.primary,
-                battery: cloudData.liveBattery.primary,
+                battery: cloudData.liveBattery.primary ?? null,
               };
             }
-            if (cloudData.liveBattery.partner != null && nextProfiles.partner) {
+            if (nextProfiles.partner) {
               nextProfiles.partner = {
                 ...nextProfiles.partner,
-                battery: cloudData.liveBattery.partner,
+                battery: cloudData.liveBattery.partner ?? null,
               };
             }
           }
@@ -88,6 +96,18 @@ export function App() {
               };
             }
           }
+          // Cloud is the source of truth for routines, EXCEPT for a profile
+          // with a pending local edit that hasn't been confirmed by the cloud yet.
+          const dirty = dirtyRoutineProfilesRef.current;
+          const cloudRoutines = cloudData.routines || [];
+          const mergedRoutines =
+            cloudRoutines.length > 0
+              ? [
+                  ...cloudRoutines.filter((r) => !dirty.has(r.profileId)),
+                  ...prev.routines.filter((r) => dirty.has(r.profileId)),
+                ]
+              : prev.routines;
+
           return {
             ...prev,
             profiles: nextProfiles,
@@ -95,11 +115,8 @@ export function App() {
             badmintonMatches:
               cloudData.badmintonMatches ?? prev.badmintonMatches,
             runningSessions: cloudData.runningSessions ?? prev.runningSessions,
-            routines:
-              cloudData.routines?.length > 0
-                ? cloudData.routines
-                : prev.routines,
-            prs: cloudData.prs ?? prev.prs,
+            routines: mergedRoutines,
+            prs: cloudData.prs ?? [],
           };
         });
       } catch (err) {
@@ -133,7 +150,6 @@ export function App() {
   const currentProfile = data.profiles?.[currentProfileKey] || {
     name: "Athlete",
     device: "Amazfit T-Rex 3",
-    recoveryScore: 88,
   };
 
   // Pure real athlete data from Supabase & Amazfit watch
@@ -167,98 +183,59 @@ export function App() {
 
   // Handlers for data updates
   const handleUpdateRoutines = (newRoutines) => {
+    const profileKey = currentProfileKey;
+    const tagged = newRoutines.map((r) => ({ ...r, profileId: profileKey }));
+
+    // Mark dirty BEFORE the state update so a poll landing mid-save can't clobber it.
+    dirtyRoutineProfilesRef.current.add(profileKey);
     setData((prev) => ({
       ...prev,
       routines: [
         ...prev.routines.filter(
-          (r) => r.profileId && r.profileId !== currentProfileKey,
+          (r) => r.profileId && r.profileId !== profileKey,
         ),
-        ...newRoutines.map((r) => ({ ...r, profileId: currentProfileKey })),
+        ...tagged,
       ],
     }));
+
+    // Write-through: the cloud is what the watch reads, so an edit that only
+    // lives in this browser's localStorage is not really saved.
+    setRoutineSyncStatus({ type: "pending", text: "Saving to cloud…" });
+    syncRoutinesToCloud(tagged, profileKey).then((res) => {
+      dirtyRoutineProfilesRef.current.delete(profileKey);
+      if (res.success) {
+        setRoutineSyncStatus({
+          type: "success",
+          text: "✓ Saved & synced to watch",
+        });
+        setTimeout(() => setRoutineSyncStatus(null), 3000);
+      } else {
+        setRoutineSyncStatus({
+          type: "error",
+          text: `Saved locally only — cloud sync failed: ${res.error}`,
+        });
+      }
+    });
   };
 
-  const handleSimulateBadminton = () => {
-    const isPrimary = currentProfileKey === "primary";
-    const newMatch = {
-      id: "b_" + Date.now(),
-      profileId: currentProfileKey,
-      date: Date.now(),
-      player1Score: 21,
-      player2Score: 18,
-      setsWonP1: 2,
-      setsWonP2: 0,
-      durationSec: 2280,
-      peakHr: isPrimary ? 176 : 170,
-      avgHr: isPrimary ? 150 : 145,
-      isWin: true,
-      opponent: isPrimary ? "Vikram S." : "Pooja R.",
-      device: currentProfile.device,
-    };
-    setData((prev) => ({
-      ...prev,
-      badmintonMatches: [newMatch, ...prev.badmintonMatches],
-    }));
-  };
+  const handleDeleteSession = async (kind, id) => {
+    const listKey = {
+      gym: "workoutLogs",
+      badminton: "badmintonMatches",
+      running: "runningSessions",
+    }[kind];
+    if (!listKey) return;
 
-  const handleSimulateH2HBadminton = () => {
-    const now = Date.now();
-    const matchPrimary = {
-      id: "b_h2h_" + now,
-      profileId: "primary",
-      date: now,
-      player1Score: 21,
-      player2Score: 19,
-      setsWonP1: 2,
-      setsWonP2: 1,
-      durationSec: 2580,
-      peakHr: 178,
-      avgHr: 152,
-      isWin: true,
-      opponent: "Wife (Amazfit)",
-      isHeadToHead: true,
-      device: "Amazfit T-Rex 3",
-    };
-    const matchPartner = {
-      id: "b_h2h_" + now + "_p",
-      profileId: "partner",
-      date: now,
-      player1Score: 19,
-      player2Score: 21,
-      setsWonP1: 1,
-      setsWonP2: 2,
-      durationSec: 2580,
-      peakHr: 174,
-      avgHr: 148,
-      isWin: false,
-      opponent: "You (T-Rex 3)",
-      isHeadToHead: true,
-      device: "Amazfit Watch",
-    };
+    // Optimistic removal; the next poll confirms against the cloud.
     setData((prev) => ({
       ...prev,
-      badmintonMatches: [matchPrimary, matchPartner, ...prev.badmintonMatches],
+      [listKey]: prev[listKey].filter((s) => s.id !== id),
     }));
-  };
 
-  const handleSimulateRun = () => {
-    const isPrimary = currentProfileKey === "primary";
-    const newRun = {
-      id: "r_" + Date.now(),
-      profileId: currentProfileKey,
-      date: Date.now(),
-      distanceKm: isPrimary ? 6.2 : 4.5,
-      durationSec: isPrimary ? 1980 : 1665,
-      avgPace: isPrimary ? "5:19" : "6:10",
-      avgHr: isPrimary ? 156 : 150,
-      calories: isPrimary ? 430 : 295,
-      cadence: isPrimary ? 168 : 172,
-      device: currentProfile.device,
-    };
-    setData((prev) => ({
-      ...prev,
-      runningSessions: [newRun, ...prev.runningSessions],
-    }));
+    const res = await deleteCloudSession(kind, id);
+    if (!res.success) {
+      alert(`Could not delete from cloud: ${res.error}`);
+    }
   };
 
   // Calculate high-level athlete metrics for active profile
@@ -382,7 +359,7 @@ export function App() {
                           fontWeight: "700",
                         }}
                       >
-                        🔋 {currentProfile.battery || 85}% BATTERY
+                        🔋 {currentProfile.battery ?? "—"}% BATTERY
                       </span>
                     </div>
                     <h1 style={{ marginTop: "2px" }}>
@@ -501,7 +478,9 @@ export function App() {
                     {totalKm.toFixed(1)}{" "}
                     <span style={{ fontSize: "1.1rem" }}>KM</span>
                   </div>
-                  <div className="metric-subtext">GPS & Cadence Tracked</div>
+                  <div className="metric-subtext">
+                    GPS Distance & Heart Rate Tracked
+                  </div>
                 </div>
               </div>
 
@@ -535,8 +514,8 @@ export function App() {
                         color: "var(--text-muted)",
                       }}
                     >
-                      No sessions logged yet. Tap "Log Workout" on your Amazfit
-                      watch or simulate one!
+                      No sessions logged yet. Finish a workout, match or run on
+                      your Amazfit watch and tap Sync — it will appear here.
                     </div>
                   ) : (
                     <div>
@@ -618,27 +597,66 @@ export function App() {
                                   </div>
                                 </div>
                               </div>
-                              <div style={{ textAlign: "right" }}>
-                                <div
+                              <div
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "12px",
+                                }}
+                              >
+                                <div style={{ textAlign: "right" }}>
+                                  <div
+                                    style={{
+                                      fontSize: "0.75rem",
+                                      color: "var(--text-muted)",
+                                    }}
+                                  >
+                                    {new Date(act.date).toLocaleDateString(
+                                      undefined,
+                                      { month: "short", day: "numeric" },
+                                    )}
+                                    {" · "}
+                                    {new Date(act.date).toLocaleTimeString(
+                                      undefined,
+                                      { hour: "2-digit", minute: "2-digit" },
+                                    )}
+                                  </div>
+                                  <div
+                                    style={{
+                                      fontSize: "0.7rem",
+                                      color: "var(--color-success)",
+                                      fontWeight: "600",
+                                    }}
+                                  >
+                                    ✓ Synced
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  title="Delete this session from the cloud"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (
+                                      confirm(
+                                        `Delete "${act.title}"? This removes it from the cloud for all devices.`,
+                                      )
+                                    ) {
+                                      handleDeleteSession(act.type, act.id);
+                                    }
+                                  }}
                                   style={{
-                                    fontSize: "0.75rem",
+                                    background: "transparent",
+                                    border: "1px solid var(--border-subtle)",
+                                    borderRadius: "8px",
                                     color: "var(--text-muted)",
+                                    cursor: "pointer",
+                                    padding: "6px 8px",
+                                    fontSize: "0.8rem",
+                                    lineHeight: 1,
                                   }}
                                 >
-                                  {new Date(act.date).toLocaleDateString(
-                                    undefined,
-                                    { month: "short", day: "numeric" },
-                                  )}
-                                </div>
-                                <div
-                                  style={{
-                                    fontSize: "0.7rem",
-                                    color: "var(--color-success)",
-                                    fontWeight: "600",
-                                  }}
-                                >
-                                  ✓ Synced
-                                </div>
+                                  🗑
+                                </button>
                               </div>
                             </div>
 
@@ -756,30 +774,60 @@ export function App() {
           )}
 
           {/* Couples Rivalry Mode */}
-          {activeTab === "comparison" && (
-            <CouplesComparisonView
-              data={data}
-              onSimulateMatch={handleSimulateH2HBadminton}
-            />
-          )}
+          {activeTab === "comparison" && <CouplesComparisonView data={data} />}
 
           {/* Gym Studio Tab */}
           {activeTab === "gym" && (
-            <GymDashboard
-              routines={profileRoutines}
-              workoutLogs={profileWorkouts}
-              onUpdateRoutines={handleUpdateRoutines}
-              prs={derivedPrs}
-              onOpenPlateCalc={() => setActiveTab("plates")}
-              profileId={currentProfileKey}
-            />
+            <>
+              {routineSyncStatus && (
+                <div
+                  role="status"
+                  style={{
+                    marginBottom: "16px",
+                    padding: "10px 16px",
+                    borderRadius: "var(--radius-md)",
+                    fontSize: "0.85rem",
+                    fontWeight: 600,
+                    border: "1px solid",
+                    borderColor:
+                      routineSyncStatus.type === "error"
+                        ? "rgba(255, 61, 0, 0.4)"
+                        : routineSyncStatus.type === "success"
+                          ? "rgba(0, 230, 118, 0.4)"
+                          : "var(--border-subtle)",
+                    background:
+                      routineSyncStatus.type === "error"
+                        ? "rgba(255, 61, 0, 0.08)"
+                        : routineSyncStatus.type === "success"
+                          ? "rgba(0, 230, 118, 0.08)"
+                          : "rgba(255,255,255,0.03)",
+                    color:
+                      routineSyncStatus.type === "error"
+                        ? "#ff6e40"
+                        : routineSyncStatus.type === "success"
+                          ? "var(--color-success)"
+                          : "var(--text-secondary)",
+                  }}
+                >
+                  {routineSyncStatus.text}
+                </div>
+              )}
+              <GymDashboard
+                routines={profileRoutines}
+                workoutLogs={profileWorkouts}
+                onUpdateRoutines={handleUpdateRoutines}
+                prs={derivedPrs}
+                onOpenPlateCalc={() => setActiveTab("plates")}
+                profileId={currentProfileKey}
+              />
+            </>
           )}
 
           {/* Badminton Tab */}
           {activeTab === "badminton" && (
             <BadmintonDashboard
               matches={profileBadminton}
-              onSimulateMatch={handleSimulateBadminton}
+              onDeleteMatch={(id) => handleDeleteSession("badminton", id)}
             />
           )}
 
@@ -787,7 +835,8 @@ export function App() {
           {activeTab === "running" && (
             <RunningDashboard
               runs={profileRuns}
-              onSimulateRun={handleSimulateRun}
+              onDeleteRun={(id) => handleDeleteSession("running", id)}
+              weeklyGoalKm={currentProfile.weeklyDistanceTargetKm || 20}
             />
           )}
 
